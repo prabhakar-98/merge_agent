@@ -1,0 +1,46 @@
+spring:
+  application:
+    name: ai-code-review-agent
+
+  ai:
+    vertex:
+      ai:
+        gemini:
+          project-id: ${GOOGLE_CLOUD_PROJECT_ID:your-gcp-project-id}
+          location: ${GOOGLE_CLOUD_LOCATION:us-central1}
+          chat:
+            options:
+              model: gemini-2.0-flash
+              temperature: 0.3
+              max-output-tokens: 8192
+
+server:
+  port: 8080
+
+# ─── GitHub Configuration ───
+github:
+  api:
+    base-url: https://api.github.com
+    token: ${GITHUB_TOKEN:}
+  webhook:
+    secret: ${GITHUB_WEBHOOK_SECRET:}
+
+# ─── Google AI / ADK Configuration ───
+google:
+  api:
+    key: ${GOOGLE_API_KEY:}
+  genai:
+    use-vertexai: ${GOOGLE_GENAI_USE_VERTEXAI:false}
+
+# ─── Agent Configuration ───
+agent:
+  model: gemini-2.0-flash
+  max-files-per-review: 50
+  max-diff-size-bytes: 500000
+
+# ─── Actuator ───
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
