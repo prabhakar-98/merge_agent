@@ -40,11 +40,28 @@
 			<version>${google-adk.version}</version>
 		</dependency>
 
-		<!-- Spring AI - Vertex AI Gemini -->
+		<!-- Google ADK Development UI -->
+		<!-- Provides web interface for testing and debugging agents -->
 		<dependency>
-			<groupId>org.springframework.ai</groupId>
-			<artifactId>spring-ai-vertex-ai-gemini-spring-boot-starter</artifactId>
+			<groupId>com.google.adk</groupId>
+			<artifactId>google-adk-dev</artifactId>
+			<version>${google-adk.version}</version>
 		</dependency>
+
+		<!-- Anthropic SDK for Claude models -->
+		<!-- Required for ClaudeModelStrategy -->
+		<!-- See: https://google.github.io/adk-docs/agents/models/anthropic/ -->
+		<dependency>
+			<groupId>com.anthropic</groupId>
+			<artifactId>anthropic-java</artifactId>
+			<version>1.0.0</version>
+		</dependency>
+
+		<!-- Spring AI - Vertex AI Gemini -->
+<!--		<dependency>-->
+<!--			<groupId>org.springframework.ai</groupId>-->
+<!--			<artifactId>spring-ai-vertex-ai-gemini-spring-boot-starter</artifactId>-->
+<!--		</dependency>-->
 
 		<!-- Jackson for JSON processing -->
 		<dependency>
@@ -61,6 +78,13 @@
 			<groupId>commons-codec</groupId>
 			<artifactId>commons-codec</artifactId>
 		</dependency>
+
+		<!-- Spring Security OAuth2 Client for GitHub OAuth App -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-oauth2-client</artifactId>
+		</dependency>
+
 
 		<!-- Lombok (optional but reduces boilerplate) -->
 		<dependency>
@@ -119,6 +143,29 @@
 						</exclude>
 					</excludes>
 				</configuration>
+			</plugin>
+			
+			<!-- Exec Maven Plugin for running ADK Dev UI -->
+			<plugin>
+				<groupId>org.codehaus.mojo</groupId>
+				<artifactId>exec-maven-plugin</artifactId>
+				<version>3.1.0</version>
+				<executions>
+					<!-- Profile: Run ADK Web Dev UI -->
+					<execution>
+						<id>adk-devui</id>
+						<goals>
+							<goal>java</goal>
+						</goals>
+						<configuration>
+							<mainClass>com.google.adk.web.AdkWebServer</mainClass>
+							<arguments>
+								<argument>--adk.agents.source-dir=target/classes</argument>
+								<argument>--server.port=8000</argument>
+							</arguments>
+						</configuration>
+					</execution>
+				</executions>
 			</plugin>
 		</plugins>
 	</build>

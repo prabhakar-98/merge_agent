@@ -12,6 +12,10 @@ import java.security.MessageDigest;
 /**
  * Verifies GitHub webhook payload signatures using HMAC-SHA256.
  * Ensures requests genuinely originate from GitHub.
+ *
+ * <p>When using GitHub App authentication, the webhook secret is configured
+ * in the GitHub App settings. This verifier validates that incoming webhook
+ * payloads are authentic.
  */
 @Component
 public class WebhookSignatureVerifier {
@@ -19,7 +23,7 @@ public class WebhookSignatureVerifier {
     private static final Logger log = LoggerFactory.getLogger(WebhookSignatureVerifier.class);
     private static final String SIGNATURE_PREFIX = "sha256=";
 
-    @Value("${github.webhook-secret}")
+    @Value("${github.webhook-secret:}")
     private String webhookSecret;
 
     /**
@@ -30,14 +34,14 @@ public class WebhookSignatureVerifier {
      * @return true if the signature is valid
      */
     public boolean isValid(String signatureHeader, byte[] payload) {
-        if (signatureHeader == null || signatureHeader.isBlank()) {
-            log.warn("Missing webhook signature header");
-            return false;
-        }
-
         if (webhookSecret == null || webhookSecret.isBlank()) {
             log.warn("Webhook secret not configured — skipping verification (NOT recommended for production)");
             return true;
+        }
+
+        if (signatureHeader == null || signatureHeader.isBlank()) {
+            log.warn("Missing webhook signature header");
+            return false;
         }
 
         if (!signatureHeader.startsWith(SIGNATURE_PREFIX)) {
