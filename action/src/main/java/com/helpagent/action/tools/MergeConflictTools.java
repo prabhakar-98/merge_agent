@@ -5,6 +5,7 @@ import com.helpagent.action.model.dto.MergeConflictInfo;
 import com.helpagent.action.service.GitHubApiService;
 import com.helpagent.action.service.GitHubOAuthService;
 import com.google.adk.tools.Annotations.Schema;
+import com.google.adk.tools.ToolContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -336,6 +337,21 @@ public class MergeConflictTools {
             response.put("error", e.getMessage());
             return response;
         }
+    }
+
+    /**
+     * Call this function ONLY when the merge conflict has been successfully resolved
+     * and all resolved files have been committed. This signals the loop to stop.
+     */
+    @Schema(description = "Call this function ONLY when the merge conflict has been successfully " +
+            "resolved and all resolved files have been committed, signaling the iterative process should end.")
+    public Map<String, String> exitLoop(@Schema(name = "toolContext") ToolContext toolContext) {
+        log.info("[Tool Call] exitLoop triggered by {}", toolContext.agentName());
+        toolContext.actions().setEscalate(true);
+        Map<String, String> result = new HashMap<>();
+        result.put("status", "loop_exited");
+        result.put("message", "Merge resolution loop completed successfully.");
+        return result;
     }
 
     /**

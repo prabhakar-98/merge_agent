@@ -1,12 +1,13 @@
 package com.helpagent.action.agent;
 
-import com.google.adk.agents.LlmAgent;
+import com.google.adk.agents.BaseAgent;
 import com.google.adk.agents.RunConfig;
 import com.google.adk.events.Event;
 import com.google.adk.runner.InMemoryRunner;
 import com.google.adk.sessions.Session;
 import com.google.genai.types.Content;
 import com.google.genai.types.Part;
+import com.helpagent.action.service.ReviewReportService;
 import com.helpagent.action.tools.OAuthContext;
 import io.reactivex.rxjava3.core.Flowable;
 import org.slf4j.Logger;
@@ -15,6 +16,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -28,10 +30,13 @@ public class MergeHelpAgentRunner {
 
     private static final Logger log = LoggerFactory.getLogger(MergeHelpAgentRunner.class);
 
-    private final LlmAgent mergeHelpAgent;
+    private final BaseAgent mergeHelpAgent;
+    private final ReviewReportService reviewReportService;
 
-    public MergeHelpAgentRunner(@Qualifier("mergeHelpAgent") LlmAgent mergeHelpAgent) {
+    public MergeHelpAgentRunner(@Qualifier("mergeHelpAgent") BaseAgent mergeHelpAgent,
+                                 ReviewReportService reviewReportService) {
         this.mergeHelpAgent = mergeHelpAgent;
+        this.reviewReportService = reviewReportService;
     }
 
     /**
@@ -93,6 +98,8 @@ public class MergeHelpAgentRunner {
             contextVariables.put("baseBranch", baseBranch);
             contextVariables.put("featureBranch", featureBranch);
             contextVariables.put("prTitle", prTitle);
+            contextVariables.put("maxIterations", 2);  // Track max loop iterations
+            contextVariables.put("currentIteration", 1);  // Track current iteration
 
             // Add OAuth user ID if provided
             if (oauthUserId != null && !oauthUserId.isBlank()) {
@@ -134,9 +141,9 @@ public class MergeHelpAgentRunner {
             log.error("Merge analysis failed for {}/{}/pull/{}: {}",
                     owner, repo, prNumber, e.getMessage(), e);
 
-            // Attempt to comment the failure on the PR
+            // Attempt to post a rich failure report on the PR
             try {
-                commentFailure(owner, repo, prNumber, e.getMessage());
+                commentFailureWithReport(owner, repo, prNumber, baseBranch, featureBranch, prTitle, e.getMessage());
             } catch (Exception commentEx) {
                 log.error("Failed to post error comment on PR: {}", commentEx.getMessage());
             }
@@ -185,6 +192,8 @@ public class MergeHelpAgentRunner {
             contextVariables.put("baseBranch", baseBranch);
             contextVariables.put("featureBranch", featureBranch);
             contextVariables.put("prTitle", prTitle);
+            contextVariables.put("maxIterations", 2);
+            contextVariables.put("currentIteration", 1);
 
             // Add OAuth user ID if provided
             if (oauthUserId != null && !oauthUserId.isBlank()) {
@@ -242,22 +251,30 @@ public class MergeHelpAgentRunner {
                 baseBranch, featureBranch, prNumber);
     }
 
-    private void commentFailure(String owner, String repo, int prNumber, String errorMessage) {
-        // Use the GitHubApiService directly for error reporting
-        String comment = String.format("""
-                ## ⚠️ Merge Help Agent — Error
-                
-                The automated merge conflict analysis encountered an error:
-                
-                ```
-                %s
-                ```
-                
-                Please review the conflicts manually or retry by pushing a new commit.
-                """, errorMessage);
+    /**
+     * Posts a rich failure report on the PR using the ReviewReportService.
+     */
+    private void commentFailureWithReport(String owner, String repo, int prNumber,
+                                           String baseBranch, String featureBranch,
+                                           String prTitle, String errorMessage) {
+        try {
+            String report = reviewReportService.generateReviewReport(
+                    owner, repo, prNumber, prTitle,
+                    baseBranch, featureBranch,
+                    "Agent encountered an internal error before completing analysis.",
+                    List.of("Error: " + errorMessage),
+                    List.of(),  // No specific conflict files identified
+                    List.of(),  // No sandbox results
+                    List.of(),  // No RAG patterns
+                    "Please review the conflicts manually or retry by pushing a new commit."
+            );
 
-        // We can't inject GitHubApiService here without a circular dependency,
-        // so we log the failure. The agent's tools already handle commenting.
-        log.error("Would post failure comment to PR #{} in {}/{}: {}", prNumber, owner, repo, comment);
+            reviewReportService.postReviewAsComment(owner, repo, prNumber, report, null);
+            log.info("Posted failure report on PR #{}", prNumber);
+        } catch (Exception e) {
+            // Fall back to simple logging
+            log.error("Failed to post failure report on PR #{} in {}/{}: {}",
+                    prNumber, owner, repo, errorMessage);
+        }
     }
 }

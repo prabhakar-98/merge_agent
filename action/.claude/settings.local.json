@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p /tmp/adk-src)",
+      "Read(//tmp/**)",
+      "Bash(unzip -q /c/Users/prabh/.m2/repository/com/google/adk/google-adk/0.5.0/google-adk-0.5.0-sources.jar)",
+      "WebFetch(domain:adk.dev)"
+    ]
+  }
+}
