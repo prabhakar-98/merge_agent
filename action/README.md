@@ -35,6 +35,28 @@ On failure after 2 iterations:
 
 See [`docs/simplified-flow-diagram.puml`](docs/simplified-flow-diagram.puml) for the full sequence diagram.
 
+## Dashboard
+
+The built-in React dashboard provides real-time visibility into agent workflows:
+
+### Overview — Active Workflows & Stats
+
+![Dashboard Overview](docs/images/dashboard-overview.png)
+
+Aggregate statistics (total runs, resolved, active, failed, human review) and live active workflow cards showing current step and progress.
+
+### Workflow Detail — Event Timeline
+
+![Workflow Detail](docs/images/dashboard-workflow-detail.png)
+
+Drill into any workflow to see the full event timeline: every tool call, text response, and agent decision with timestamps.
+
+### Resolution History
+
+![Resolution History](docs/images/dashboard-resolution-history.png)
+
+Historical view of all processed PRs with their status (Completed, Escalated, Failed), repository, branch info, and timestamps.
+
 ## Features
 
 - **Automatic Conflict Resolution**: Detects merge conflicts, reads both sides, and generates smart resolutions
