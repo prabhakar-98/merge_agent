@@ -16,6 +16,13 @@ When a pull request is opened, updated, or reopened on GitHub, the agent automat
 8. **Stores successful resolution patterns in the RAG** for future use
 9. If resolution fails after 2 attempts, escalates to human review with a **detailed review.md report** summarizing what was attempted and which files need manual attention
 
+### Frontend Dashboard
+A built-in **React (Vite) Dashboard** allows users to:
+- Authenticate via GitHub OAuth
+- Monitor **live agent workflows** in real-time
+- View a historical timeline of past resolutions and ADK tool calls
+- The dashboard is accessible at `http://localhost:5173` during development.
+
 ### How it works
 - A **GitHub webhook** triggers the flow. The controller validates the signature, parses the event, and hands off to the agent runner asynchronously (returns 202 immediately).
 - The **Google ADK LoopAgent** orchestrates the LLM agent. It wraps an `LlmAgent` with retry logic (max 2 iterations). The LLM agent has access to 12 function tools split across two tool classes:
@@ -25,7 +32,8 @@ When a pull request is opened, updated, or reopened on GitHub, the agent automat
 - **Docker Sandbox** (`SandboxService`): Spins up Testcontainers with language-appropriate runtimes (OpenJDK, Python, Node.js) to compile/lint resolved code before committing.
 - **RAG Pattern Store** (`ConflictPatternStore`): Uses LangChain4j `InMemoryEmbeddingStore` with `AllMiniLmL6V2` embedding model for vector similarity search. Patterns persist as JSON to `data/conflict-patterns/`.
 - **Review Reports** (`ReviewReportService`): Generates structured Markdown review reports with conflict summaries, attempt history, sandbox results, and suggestions. Posted as PR comments on escalation.
-- **OAuth**: supports per-user GitHub OAuth tokens (thread-local via `OAuthContext`) so the agent can act on behalf of the PR author. Falls back to default credentials if no user token is available.
+- **Data Persistence**: Uses PostgreSQL for multi-user OAuth token persistence, workflow state tracking (`agent_workflows`), and granular ADK event logging (`agent_events`).
+- **ADK Events Logging**: `MergeHelpAgentRunner` captures every ADK event (tool calls, text responses, escalations) and stores it in the database for real-time tracking in the dashboard.
 
 ## Tech Stack
 
@@ -34,17 +42,20 @@ When a pull request is opened, updated, or reopened on GitHub, the agent automat
 - Anthropic Claude SDK 1.0.0
 - LangChain4j 0.33.0 (embeddings & RAG)
 - Testcontainers 1.19.7 (Docker sandbox)
-- Spring Security OAuth2, WebFlux
+- PostgreSQL 16 (persistence for workflows, events, and tokens)
+- React 19, Vite, React Router (Frontend dashboard)
+- Spring Data JPA, Spring Security OAuth2, WebFlux
 
 ## Build & Run
 
 ```bash
+docker compose up -d                                    # start PostgreSQL
 ./mvnw clean package                                    # build
 ./mvnw spring-boot:run                                  # run (default profile)
 ./mvnw spring-boot:run -Dspring-boot.run.profiles=devui # run with ADK Dev UI on port 8000
 ```
 
-**Prerequisites**: Docker must be running for sandbox code validation.
+**Prerequisites**: Docker must be running for PostgreSQL and sandbox code validation.
 
 ## Project Structure
 
@@ -55,11 +66,14 @@ src/main/java/com/helpagent/action/
   controller/     # MergeWebhookController (webhook listener), GitHubOAuthController, MergeAnalysisController
   exception/      # GlobalExceptionHandler
   model/dto/      # PullRequestEvent, MergeConflictInfo, ConflictResolution, SandboxResult, ConflictPattern
+  model/entity/   # OAuthTokenEntity, AgentWorkflowEntity, AgentEventEntity, WorkflowStatus
   model/strategy/ # ModelStrategy interface + ClaudeModelStrategy, GeminiModelStrategy, ModelStrategyFactory
+  repository/     # OAuthTokenRepository, AgentWorkflowRepository, AgentEventRepository
   rag/            # ConflictPatternStore (RAG vector store for conflict resolution patterns)
   security/       # WebhookSignatureVerifier (HMAC-SHA256)
   service/        # GitHubApiService (REST client), GitHubOAuthService, OAuthToken, SandboxService, ReviewReportService
   tools/          # MergeConflictTools (GitHub tools), CodeReviewTools (sandbox/RAG/review tools), OAuthContext
+frontend/         # React application (Vite, App.jsx, components/, hooks/)
 ```
 
 ## Key Endpoints
@@ -69,7 +83,10 @@ src/main/java/com/helpagent/action/
 - `POST /api/webhooks/github/merge/analyze` -- synchronous analysis
 - `GET /api/webhooks/github/merge/health` -- health check
 - `GET /api/oauth/github/authorize` -- start OAuth flow
-- `GET /api/oauth/github/callback` -- OAuth callback
+- `GET /api/oauth/github/callback` -- OAuth callback (redirects to React frontend)
+- `GET /api/dashboard/workflows/active` -- fetch active workflows for UI
+- `GET /api/dashboard/workflows/history` -- fetch historical workflows for UI
+- `GET /api/dashboard/stats` -- fetch aggregate agent statistics
 
 ## Architecture Notes
 
@@ -88,20 +105,36 @@ src/main/java/com/helpagent/action/
 1. fetchBranchInfo (both branches)
 2. detectMergeConflicts
 3. fetchFileContent (conflicting files)
-4. searchConflictPatterns (RAG query)           ← NEW
+4. searchConflictPatterns (RAG query)
 5. LLM analyzes + generates resolution
-6. validateCodeInSandbox (each resolved file)   ← NEW
-   └─ if fail → fix + re-validate (1 retry)
+6. validateCodeInSandbox (each resolved file)
+   └─ if fail → LLM reads error, fixes code → re-validate (1 retry per file)
 7. createResolutionBranch + commitResolvedFile
 8. Code review: re-check diff quality
-   └─ if issues → loop back (iteration 2)
-9. storeConflictPattern (on success)            ← NEW
+   └─ if issues → loop back (iteration 2, repeats steps 1-7)
+9. storeConflictPattern (on success)
 10. commentOnPullRequest + exitLoop
 
-ON FAILURE AFTER 2 ITERATIONS:
-11. generateHumanReviewReport (review.md)       ← NEW
-12. exitLoop
+HUMAN-IN-THE-LOOP (after 2 failed iterations):
+11. generateHumanReviewReport → builds review.md with:
+    - Conflict summary per file
+    - Attempt history (what was tried in each iteration)
+    - Sandbox error outputs from failed validations
+    - Suggested manual resolution strategies
+12. commentOnPullRequest (posts escalation report on PR)
+13. exitLoop → human reviewer takes over
 ```
+
+### Retry Strategy
+
+- **Per-file retry**: If sandbox validation fails for a resolved file, the LLM reads the compiler/linter error output, fixes the code, and re-validates once before moving on.
+- **Per-iteration retry**: If the overall code review (diff quality check) finds issues after all files are processed, the LoopAgent triggers iteration 2 which repeats the full analysis-resolve-validate cycle.
+- **Escalation**: After 2 full iterations fail, the agent does NOT silently give up. It generates a structured diagnostic report and posts it on the PR so a human has full context to continue.
+
+## Diagrams
+
+- `docs/sequence-diagram.puml` — Detailed sequence diagram (all internal services)
+- `docs/high-level-sequence-diagram.puml` — High-level flow with tools as separate actors, showing retry + human-in-the-loop paths
 
 ## Environment Variables
 
@@ -110,6 +143,11 @@ Required:
 - `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET` -- OAuth app credentials
 - `CLAUDE_API_KEY` or `ANTHROPIC_API_KEY` -- for Claude provider
 - `GEMINI_API_KEY` or `GOOGLE_API_KEY` -- for Gemini provider
+
+Database:
+- `DATABASE_URL` -- PostgreSQL JDBC URL (default: `jdbc:postgresql://localhost:5432/mergehelpagent`)
+- `DATABASE_USERNAME` -- database username (default: `mergehelpagent`)
+- `DATABASE_PASSWORD` -- database password (default: `mergehelpagent`)
 
 Optional:
 - `OLLAMA_BASE_URL` -- local model endpoint

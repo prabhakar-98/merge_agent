@@ -25,7 +25,7 @@ public class GitHubOAuthProperties {
     /**
      * The callback URL registered with GitHub OAuth App
      */
-    private String redirectUri = "http://192.168.1.3:8080/oauth/callback";
+    private String redirectUri = "http://192.168.1.9:8080/oauth/callback";
 
     /**
      * Comma-separated list of OAuth scopes to request

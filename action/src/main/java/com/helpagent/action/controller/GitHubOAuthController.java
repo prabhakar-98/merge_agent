@@ -6,6 +6,7 @@ import com.helpagent.action.service.OAuthToken;
 import jakarta.servlet.http.HttpSession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -29,10 +30,12 @@ import java.util.UUID;
 public class GitHubOAuthController {
 
     private static final Logger log = LoggerFactory.getLogger(GitHubOAuthController.class);
-    private static final String STATE_SESSION_KEY = "oauth_state";
     private static final String USER_SESSION_KEY = "github_user";
 
     private final GitHubOAuthService oAuthService;
+
+    @Value("${frontend.url:http://localhost:5173}")
+    private String frontendUrl;
 
     public GitHubOAuthController(GitHubOAuthService oAuthService) {
         this.oAuthService = oAuthService;
@@ -40,12 +43,9 @@ public class GitHubOAuthController {
 
     /**
      * Initiate the OAuth flow by redirecting to GitHub authorization page.
-     *
-     * @param session The HTTP session to store the state parameter
-     * @return Redirect response to GitHub
      */
     @GetMapping("/login")
-    public ResponseEntity<?> login(HttpSession session) {
+    public ResponseEntity<?> login() {
         if (!oAuthService.isOAuthConfigured()) {
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
                     .body(Map.of(
@@ -55,9 +55,8 @@ public class GitHubOAuthController {
                     ));
         }
 
-        // Generate a random state parameter to prevent CSRF attacks
         String state = UUID.randomUUID().toString();
-        session.setAttribute(STATE_SESSION_KEY, state);
+        oAuthService.storeState(state);
 
         String authorizationUrl = oAuthService.getAuthorizationUrl(state);
         log.info("Redirecting to GitHub authorization URL");
@@ -69,21 +68,13 @@ public class GitHubOAuthController {
 
     /**
      * Handle the OAuth callback from GitHub after user authorization.
-     *
-     * @param code  The authorization code from GitHub
-     * @param state The state parameter for CSRF validation
-     * @param error The error code if authorization was denied
-     * @param errorDescription Description of the error
-     * @param session The HTTP session
-     * @return Success or error response
      */
     @GetMapping("/callback")
     public ResponseEntity<?> callback(
             @RequestParam(required = false) String code,
             @RequestParam(required = false) String state,
             @RequestParam(name = "error", required = false) String error,
-            @RequestParam(name = "error_description", required = false) String errorDescription,
-            HttpSession session) {
+            @RequestParam(name = "error_description", required = false) String errorDescription) {
 
         // Check for errors from GitHub
         if (error != null) {
@@ -96,8 +87,7 @@ public class GitHubOAuthController {
         }
 
         // Validate the state parameter
-        String storedState = (String) session.getAttribute(STATE_SESSION_KEY);
-        if (storedState == null || !storedState.equals(state)) {
+        if (state == null || !oAuthService.validateAndConsumeState(state)) {
             log.warn("Invalid state parameter in OAuth callback");
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(Map.of(
@@ -105,9 +95,6 @@ public class GitHubOAuthController {
                             "message", "Invalid state parameter. Please try logging in again."
                     ));
         }
-
-        // Clear the state from session
-        session.removeAttribute(STATE_SESSION_KEY);
 
         if (code == null || code.isBlank()) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
@@ -126,50 +113,75 @@ public class GitHubOAuthController {
             String userId = userInfo.get("id").asText();
             String username = userInfo.get("login").asText();
 
-            // Store the token
-            oAuthService.storeToken(userId, token);
-
-            // Store user info in session
-            session.setAttribute(USER_SESSION_KEY, Map.of(
-                    "id", userId,
-                    "username", username,
-                    "name", userInfo.has("name") && !userInfo.get("name").isNull() 
-                            ? userInfo.get("name").asText() 
-                            : username,
-                    "avatar_url", userInfo.has("avatar_url") 
-                            ? userInfo.get("avatar_url").asText() 
-                            : ""
-            ));
+            // Store the token with username for multi-user support
+            oAuthService.storeToken(userId, username, token);
 
             log.info("Successfully authenticated user: {} ({})", username, userId);
 
-            return ResponseEntity.ok(Map.of(
-                    "message", "Successfully authenticated",
-                    "user", Map.of(
-                            "id", userId,
-                            "username", username,
-                            "name", userInfo.has("name") && !userInfo.get("name").isNull() 
-                                    ? userInfo.get("name").asText() 
-                                    : username
-                    )
-            ));
+            // Create a one-time auth code for the frontend to exchange
+            String authCode = oAuthService.createAuthCode(userId);
+            String redirectUrl = frontendUrl + "/?auth_code=" + authCode;
+            return ResponseEntity.status(HttpStatus.FOUND)
+                    .header("Location", redirectUrl)
+                    .build();
 
         } catch (Exception e) {
             log.error("Failed to complete OAuth flow: {}", e.getMessage(), e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of(
-                            "error", "authentication_failed",
-                            "message", "Failed to complete authentication: " + e.getMessage()
-                    ));
+            // Redirect to frontend with error
+            String errorRedirect = frontendUrl + "/?error=authentication_failed";
+            return ResponseEntity.status(HttpStatus.FOUND)
+                    .header("Location", errorRedirect)
+                    .build();
         }
     }
 
     /**
-     * Check the current authentication status.
-     *
-     * @param session The HTTP session
-     * @return Authentication status and user info if authenticated
+     * Exchange a one-time auth code (from the callback redirect) for user info.
+     * Called by the frontend after OAuth redirect.
      */
+    @PostMapping("/exchange")
+    public ResponseEntity<?> exchange(@RequestBody Map<String, String> body) {
+        String authCode = body.get("code");
+        if (authCode == null || authCode.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "missing_code",
+                    "message", "No auth code provided"
+            ));
+        }
+
+        String userId = oAuthService.exchangeAuthCode(authCode);
+        if (userId == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of(
+                    "error", "invalid_code",
+                    "message", "Invalid or expired auth code. Please log in again."
+            ));
+        }
+
+        if (!oAuthService.hasValidToken(userId)) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of(
+                    "error", "token_invalid",
+                    "message", "Token is no longer valid. Please log in again."
+            ));
+        }
+
+        JsonNode userInfo = oAuthService.getAuthenticatedUser(oAuthService.getAccessToken(userId));
+        String username = userInfo.get("login").asText();
+        String name = userInfo.has("name") && !userInfo.get("name").isNull()
+                ? userInfo.get("name").asText()
+                : username;
+        String avatarUrl = userInfo.has("avatar_url") ? userInfo.get("avatar_url").asText() : "";
+
+        return ResponseEntity.ok(Map.of(
+                "authenticated", true,
+                "user", Map.of(
+                        "id", userId,
+                        "username", username,
+                        "name", name,
+                        "avatar_url", avatarUrl
+                )
+        ));
+    }
+
     @GetMapping("/status")
     public ResponseEntity<?> status(HttpSession session) {
         @SuppressWarnings("unchecked")
@@ -225,12 +237,9 @@ public class GitHubOAuthController {
 
     /**
      * Get the authorization URL without redirecting (for SPAs).
-     *
-     * @param session The HTTP session
-     * @return The authorization URL
      */
     @GetMapping("/authorize-url")
-    public ResponseEntity<?> getAuthorizeUrl(HttpSession session) {
+    public ResponseEntity<?> getAuthorizeUrl() {
         if (!oAuthService.isOAuthConfigured()) {
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
                     .body(Map.of(
@@ -240,7 +249,7 @@ public class GitHubOAuthController {
         }
 
         String state = UUID.randomUUID().toString();
-        session.setAttribute(STATE_SESSION_KEY, state);
+        oAuthService.storeState(state);
 
         return ResponseEntity.ok(Map.of(
                 "authorizationUrl", oAuthService.getAuthorizationUrl(state),

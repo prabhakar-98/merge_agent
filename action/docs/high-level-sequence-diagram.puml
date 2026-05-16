@@ -1,0 +1,182 @@
+@startuml Merge Help Agent - High Level Sequence Diagram
+
+title Merge Help Agent - High Level Flow (Retry + Human-in-the-Loop)
+
+skinparam backgroundColor #FEFEFE
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+
+actor "GitHub" as GH #LightBlue
+participant "Agent\nRunner" as Runner #LightGreen
+participant "LLM\nAgent" as LLM #Orange
+participant "MergeConflict\nTools" as MCTools #LightCoral
+participant "CodeReview\nTools" as CRTools #Plum
+participant "Sandbox\n(Docker)" as Sandbox #Cyan
+participant "RAG\nStore" as RAG #Pink
+
+== Webhook Reception ==
+
+GH -> Runner : POST webhook\n(PR opened/sync/reopened)
+activate Runner
+Runner --> GH : 202 Accepted
+Runner -> Runner : set OAuthContext
+Runner -> LLM : run(session, context)
+activate LLM
+
+== Iteration 1 ==
+
+LLM -> MCTools : fetchBranchInfo(base)
+activate MCTools
+MCTools -> GH : GET branches
+GH --> MCTools : SHA
+MCTools --> LLM : baseSHA
+deactivate MCTools
+
+LLM -> MCTools : fetchBranchInfo(head)
+activate MCTools
+MCTools -> GH : GET branches
+GH --> MCTools : SHA
+MCTools --> LLM : headSHA
+deactivate MCTools
+
+LLM -> MCTools : detectMergeConflicts(base, head)
+activate MCTools
+MCTools -> GH : GET compare
+GH --> MCTools : conflicting files
+MCTools --> LLM : conflicts list
+deactivate MCTools
+
+LLM -> MCTools : fetchFileContent(base + head)
+activate MCTools
+MCTools -> GH : GET contents
+GH --> MCTools : file content
+MCTools --> LLM : base & head file content
+deactivate MCTools
+
+LLM -> CRTools : searchConflictPatterns(description)
+activate CRTools
+CRTools -> RAG : findSimilarPatterns(query)
+activate RAG
+RAG -> RAG : embed + cosine similarity
+RAG --> CRTools : results
+deactivate RAG
+
+alt RAG patterns found
+    CRTools --> LLM : past resolution patterns\n(use as guidance)
+else No patterns found
+    CRTools --> LLM : "No similar patterns found.\nProceed with independent analysis."
+end
+deactivate CRTools
+
+LLM -> LLM : Analyze conflict\n+ generate resolution\n(LLM reasoning with or without RAG guidance)
+
+== Sandbox Validation ==
+
+LLM -> CRTools : validateCodeInSandbox(resolvedCode)
+activate CRTools
+CRTools -> Sandbox : validate(content, language)
+activate Sandbox
+Sandbox -> Sandbox : compile / lint
+Sandbox --> CRTools : FAIL (errors)
+deactivate Sandbox
+CRTools --> LLM : validation failed + error output
+deactivate CRTools
+
+== Retry (fix + re-validate) ==
+
+LLM -> LLM : Read error output\nFix resolved code
+
+LLM -> CRTools : validateCodeInSandbox(fixedCode)
+activate CRTools
+CRTools -> Sandbox : validate(fixedContent, language)
+activate Sandbox
+Sandbox -> Sandbox : compile / lint
+Sandbox --> CRTools : PASS
+deactivate Sandbox
+CRTools --> LLM : validation passed
+deactivate CRTools
+
+== Commit Resolution ==
+
+LLM -> MCTools : createResolutionBranch(baseSHA)
+activate MCTools
+MCTools -> GH : POST git/refs
+GH --> MCTools : branch created
+MCTools --> LLM : success
+deactivate MCTools
+
+LLM -> MCTools : commitResolvedFile(branch, path, content)
+activate MCTools
+MCTools -> GH : PUT contents/{path}
+GH --> MCTools : committed
+MCTools --> LLM : commit SHA
+deactivate MCTools
+
+== Store Pattern + Comment ==
+
+LLM -> CRTools : storeConflictPattern(resolution)
+activate CRTools
+CRTools -> RAG : store(pattern)
+activate RAG
+RAG -> RAG : embed + persist
+RAG --> CRTools : stored
+deactivate RAG
+CRTools --> LLM : pattern saved
+deactivate CRTools
+
+LLM -> MCTools : commentOnPullRequest(analysis)
+activate MCTools
+MCTools -> GH : POST issue comment
+GH --> MCTools : comment created
+MCTools --> LLM : posted
+deactivate MCTools
+
+LLM -> MCTools : exitLoop()
+activate MCTools
+MCTools --> LLM : done
+deactivate MCTools
+
+deactivate LLM
+Runner -> Runner : OAuthContext.clear()
+deactivate Runner
+
+== Failure Path: Human-in-the-Loop ==
+
+note over Runner, RAG #FFCCCC
+  If resolution fails after 2 iterations,
+  the agent escalates to a human reviewer
+end note
+
+GH -> Runner : (iteration 2 also failed)
+activate Runner
+Runner -> LLM : escalate
+activate LLM
+
+LLM -> CRTools : generateHumanReviewReport(\nconflicts, attempts, sandboxResults)
+activate CRTools
+CRTools -> CRTools : Build review.md:\n- Conflict summary\n- Attempt history (2 iterations)\n- Sandbox error outputs\n- Manual resolution suggestions
+CRTools --> LLM : review report (Markdown)
+deactivate CRTools
+
+LLM -> MCTools : commentOnPullRequest(escalation report)
+activate MCTools
+MCTools -> GH : POST issue comment\n(detailed escalation)
+GH --> MCTools : comment created
+MCTools --> LLM : escalation posted
+deactivate MCTools
+
+LLM -> MCTools : exitLoop()
+activate MCTools
+MCTools --> LLM : done
+deactivate MCTools
+
+deactivate LLM
+Runner -> Runner : OAuthContext.clear()
+deactivate Runner
+
+note over GH #LIGHTYELLOW
+  Human reviewer picks up from the
+  escalation comment with full diagnostic info
+end note
+
+@enduml

@@ -1,0 +1,74 @@
+@startuml Merge Help Agent - Simplified Flow
+
+title Merge Help Agent - Conflict Resolution Flow
+
+skinparam backgroundColor #FEFEFE
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+
+actor "GitHub" as GH #LightBlue
+participant "Agent\nRunner" as Agent #LightGreen
+participant "LLM\n(Claude/Gemini)" as LLM #Orange
+participant "RAG\nPattern Store" as RAG #Pink
+participant "Sandbox\n(Docker)" as Sandbox #Cyan
+
+== PR Event Received ==
+
+GH -> Agent : PR opened / updated
+Agent --> GH : 202 Accepted (processing async)
+Agent -> LLM : Start conflict resolution
+
+== Analyze Conflict ==
+
+LLM -> GH : Fetch branch info & file content
+GH --> LLM : Files from both branches
+
+LLM -> GH : Detect merge conflicts
+GH --> LLM : List of conflicting files
+
+== Search Past Resolutions ==
+
+LLM -> RAG : Search for similar conflicts
+
+alt Past patterns found
+    RAG --> LLM : Similar resolutions (use as guidance)
+else No patterns found
+    RAG --> LLM : No matches — proceed with independent analysis
+end
+
+== Generate Resolution ==
+
+LLM -> LLM : Analyze conflicts\nand generate resolution
+
+== Validate ==
+
+LLM -> Sandbox : Validate resolved code (compile/lint)
+
+alt Validation passes
+    Sandbox --> LLM : Code is valid
+else Validation fails
+    Sandbox --> LLM : Errors found
+    LLM -> LLM : Read errors and fix code
+    LLM -> Sandbox : Re-validate fixed code
+    Sandbox --> LLM : Pass / Fail
+end
+
+== Commit & Learn ==
+
+alt Resolution successful
+    LLM -> GH : Create resolution branch
+    LLM -> GH : Commit resolved files
+    LLM -> RAG : Store resolution pattern\n(for future use)
+    LLM -> GH : Comment on PR with analysis
+    LLM -> Agent : Done
+else Resolution failed after 2 attempts
+    LLM -> LLM : Generate human review report\n(conflicts, attempts, errors, suggestions)
+    LLM -> GH : Post escalation report on PR
+    LLM -> Agent : Escalated to human
+    note over GH #LIGHTYELLOW
+      Human reviewer takes over
+      with full diagnostic context
+    end note
+end
+
+@enduml

@@ -16,8 +16,7 @@ public class ModelProperties {
     /**
      * The model provider to use: gemini, claude, ollama, litellm
      */
-    //private String provider = "gemini";
-    private String provider="claude";
+    private String provider = "gemini";
 
     /**
      * Gemini-specific configuration
@@ -33,6 +32,11 @@ public class ModelProperties {
      * Ollama-specific configuration (for local models)
      */
     private OllamaConfig ollama = new OllamaConfig();
+
+    /**
+     * OpenRouter-specific configuration
+     */
+    private OpenRouterConfig openrouter = new OpenRouterConfig();
 
     /**
      * LiteLLM-specific configuration
@@ -70,6 +74,14 @@ public class ModelProperties {
 
     public void setOllama(OllamaConfig ollama) {
         this.ollama = ollama;
+    }
+
+    public OpenRouterConfig getOpenrouter() {
+        return openrouter;
+    }
+
+    public void setOpenrouter(OpenRouterConfig openrouter) {
+        this.openrouter = openrouter;
     }
 
     public LiteLlmConfig getLitellm() {
@@ -142,6 +154,36 @@ public class ModelProperties {
 
         public void setModelId(String modelId) {
             this.modelId = modelId;
+        }
+
+        public String getBaseUrl() {
+            return baseUrl;
+        }
+
+        public void setBaseUrl(String baseUrl) {
+            this.baseUrl = baseUrl;
+        }
+    }
+
+    public static class OpenRouterConfig {
+        private String modelId = "nvidia/llama-3.3-nemotron-super-49b-v1:free";
+        private String apiKey;
+        private String baseUrl = "https://openrouter.ai/api/v1";
+
+        public String getModelId() {
+            return modelId;
+        }
+
+        public void setModelId(String modelId) {
+            this.modelId = modelId;
+        }
+
+        public String getApiKey() {
+            return apiKey;
+        }
+
+        public void setApiKey(String apiKey) {
+            this.apiKey = apiKey;
         }
 
         public String getBaseUrl() {

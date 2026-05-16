@@ -34,9 +34,12 @@ public class SecurityConfig {
                 // Public endpoints
                 .requestMatchers("/oauth/**").permitAll()
                 .requestMatchers("/api/webhook/**").permitAll()
+                .requestMatchers("/api/dashboard/**").permitAll()
+                .requestMatchers("/api/merge-analysis/**").permitAll()
                 .requestMatchers("/actuator/**").permitAll()
                 .requestMatchers("/health").permitAll()
                 .requestMatchers("/").permitAll()
+                .requestMatchers("/index.html", "/static/**", "/assets/**", "/*.js", "/*.css").permitAll()
                 
                 // All other requests can be accessed (add authentication as needed)
                 .anyRequest().permitAll()
@@ -48,9 +51,9 @@ public class SecurityConfig {
             // Disable HTTP Basic auth
             .httpBasic(AbstractHttpConfigurer::disable)
 
-            // Make the application stateless (no sessions)
+            // Use IF_REQUIRED sessions (needed for OAuth session cookies)
             .sessionManagement(session -> session
-                .sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+                .sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED)
             );
 
         return http.build();

@@ -41,9 +41,10 @@ public class ModelStrategyFactory {
         return switch (provider) {
             case "gemini" -> createGeminiStrategy();
             case "claude", "anthropic" -> createClaudeStrategy();
+            case "openrouter" -> createOpenRouterStrategy();
             default -> throw new IllegalArgumentException(
-                "Unsupported model provider: " + provider + 
-                ". Supported providers: gemini, claude, ollama, litellm"
+                "Unsupported model provider: " + provider +
+                ". Supported providers: gemini, claude, openrouter, ollama, litellm"
             );
         };
     }
@@ -64,12 +65,11 @@ public class ModelStrategyFactory {
         return new ClaudeModelStrategy(config.getModelId(), config.getApiKey());
     }
 
-    /**
-     * Creates an Ollama model strategy for local models.
-     */
-    /**
-     * Creates a LiteLLM model strategy.
-     */
+    private openrouter createOpenRouterStrategy() {
+        ModelProperties.OpenRouterConfig config = modelProperties.getOpenrouter();
+        return new openrouter(config.getModelId(), config.getApiKey());
+    }
+
 
 
     /**

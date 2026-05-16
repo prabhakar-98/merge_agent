@@ -3,6 +3,8 @@ package com.helpagent.action.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.helpagent.action.config.GitHubOAuthProperties;
+import com.helpagent.action.model.entity.OAuthTokenEntity;
+import com.helpagent.action.repository.OAuthTokenRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
@@ -13,58 +15,43 @@ import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import java.nio.charset.StandardCharsets;
-import java.util.Map;
+import java.time.Instant;
+import java.util.Base64;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * Service for handling GitHub OAuth 2.0 authentication flow.
- * 
- * <p>This service implements the OAuth 2.0 Authorization Code Grant flow:
- * <ol>
- *   <li>Generate authorization URL → User redirected to GitHub</li>
- *   <li>User authorizes the app → GitHub redirects back with code</li>
- *   <li>Exchange code for access token</li>
- *   <li>Use token to access GitHub API on behalf of user</li>
- * </ol>
- * 
- * <p>Token storage is in-memory by default. For production, consider using
- * a persistent store (database, Redis) with encryption.
- * 
- * @see <a href="https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps">GitHub OAuth Apps</a>
- * @see <a href="https://docs.github.com/en/rest/about-the-rest-api/about-the-rest-api">GitHub REST API</a>
- */
 @Service
 public class GitHubOAuthService {
 
     private static final Logger log = LoggerFactory.getLogger(GitHubOAuthService.class);
-    
+
     private static final String GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
     private static final String GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
     private static final String GITHUB_API_BASE = "https://api.github.com";
-    
-    // Token refresh buffer: refresh 5 minutes before expiry
+
     private static final int REFRESH_BUFFER_SECONDS = 300;
+    private static final long STATE_EXPIRY_MS = 600_000; // 10 minutes
+
+    private final ConcurrentHashMap<String, Long> pendingStates = new ConcurrentHashMap<>();
 
     private final GitHubOAuthProperties oauthProperties;
     private final ObjectMapper objectMapper;
     private final WebClient webClient;
     private final WebClient apiClient;
+    private final OAuthTokenRepository tokenRepository;
 
-    // In-memory token storage: userId -> token
-    // For production, use a persistent encrypted store
-    private final Map<String, OAuthToken> tokenStore = new ConcurrentHashMap<>();
-
-    public GitHubOAuthService(GitHubOAuthProperties oauthProperties, ObjectMapper objectMapper) {
+    public GitHubOAuthService(GitHubOAuthProperties oauthProperties, ObjectMapper objectMapper,
+                              OAuthTokenRepository tokenRepository) {
         this.oauthProperties = oauthProperties;
         this.objectMapper = objectMapper;
-        
-        // Client for token exchange (github.com)
+        this.tokenRepository = tokenRepository;
+
         this.webClient = WebClient.builder()
                 .defaultHeader(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE)
                 .defaultHeader(HttpHeaders.USER_AGENT, "MergeHelpAgent/1.0")
                 .build();
-        
-        // Client for API calls (api.github.com)
+
         this.apiClient = WebClient.builder()
                 .baseUrl(GITHUB_API_BASE)
                 .defaultHeader(HttpHeaders.ACCEPT, "application/vnd.github+json")
@@ -73,22 +60,13 @@ public class GitHubOAuthService {
                 .build();
     }
 
-    /**
-     * Checks if OAuth is properly configured.
-     */
     public boolean isOAuthConfigured() {
         return oauthProperties.isConfigured();
     }
 
-    /**
-     * Generates the GitHub authorization URL for the OAuth flow.
-     * 
-     * @param state A random string to prevent CSRF attacks (must be verified on callback)
-     * @return The full authorization URL to redirect the user to
-     */
     public String getAuthorizationUrl(String state) {
         String scopes = oauthProperties.getScopes();
-        
+
         return UriComponentsBuilder.fromUriString(GITHUB_AUTHORIZE_URL)
                 .queryParam("client_id", oauthProperties.getClientId())
                 .queryParam("redirect_uri", oauthProperties.getRedirectUri())
@@ -99,13 +77,6 @@ public class GitHubOAuthService {
                 .toUriString();
     }
 
-    /**
-     * Exchanges an authorization code for an access token.
-     * 
-     * @param code The authorization code received from GitHub
-     * @return The OAuth token
-     * @throws RuntimeException if the token exchange fails
-     */
     public OAuthToken exchangeCodeForToken(String code) {
         log.info("Exchanging authorization code for access token");
 
@@ -124,30 +95,28 @@ public class GitHubOAuthService {
 
             JsonNode tokenData = objectMapper.readTree(response);
 
-            // Check for error
             if (tokenData.has("error")) {
                 String error = tokenData.get("error").asText();
-                String description = tokenData.has("error_description") 
-                        ? tokenData.get("error_description").asText() 
+                String description = tokenData.has("error_description")
+                        ? tokenData.get("error_description").asText()
                         : "Unknown error";
                 log.error("Token exchange failed: {} - {}", error, description);
                 throw new RuntimeException("OAuth token exchange failed: " + description);
             }
 
             String accessToken = tokenData.get("access_token").asText();
-            String tokenType = tokenData.has("token_type") 
-                    ? tokenData.get("token_type").asText() 
+            String tokenType = tokenData.has("token_type")
+                    ? tokenData.get("token_type").asText()
                     : "bearer";
-            String scope = tokenData.has("scope") 
-                    ? tokenData.get("scope").asText() 
+            String scope = tokenData.has("scope")
+                    ? tokenData.get("scope").asText()
                     : "";
 
-            // Handle optional expiration (for GitHub Apps with expiring tokens)
-            String refreshToken = tokenData.has("refresh_token") 
-                    ? tokenData.get("refresh_token").asText() 
+            String refreshToken = tokenData.has("refresh_token")
+                    ? tokenData.get("refresh_token").asText()
                     : null;
-            int expiresIn = tokenData.has("expires_in") 
-                    ? tokenData.get("expires_in").asInt() 
+            int expiresIn = tokenData.has("expires_in")
+                    ? tokenData.get("expires_in").asInt()
                     : 0;
 
             OAuthToken token;
@@ -167,12 +136,6 @@ public class GitHubOAuthService {
         }
     }
 
-    /**
-     * Refreshes an expired OAuth token using the refresh token.
-     * 
-     * @param refreshToken The refresh token
-     * @return The new OAuth token
-     */
     public OAuthToken refreshAccessToken(String refreshToken) {
         log.info("Refreshing OAuth access token");
 
@@ -199,8 +162,8 @@ public class GitHubOAuthService {
             String accessToken = tokenData.get("access_token").asText();
             String tokenType = tokenData.get("token_type").asText();
             String scope = tokenData.has("scope") ? tokenData.get("scope").asText() : "";
-            String newRefreshToken = tokenData.has("refresh_token") 
-                    ? tokenData.get("refresh_token").asText() 
+            String newRefreshToken = tokenData.has("refresh_token")
+                    ? tokenData.get("refresh_token").asText()
                     : refreshToken;
             int expiresIn = tokenData.has("expires_in") ? tokenData.get("expires_in").asInt() : 0;
 
@@ -213,12 +176,6 @@ public class GitHubOAuthService {
         }
     }
 
-    /**
-     * Gets the authenticated user's information.
-     * 
-     * @param accessToken The access token
-     * @return User data as JSON
-     */
     public JsonNode getAuthenticatedUser(String accessToken) {
         log.debug("Fetching authenticated user info");
 
@@ -238,126 +195,161 @@ public class GitHubOAuthService {
         }
     }
 
-    /**
-     * Stores a token for a user.
-     * 
-     * @param userId The GitHub user ID
-     * @param token The OAuth token
-     */
-    public void storeToken(String userId, OAuthToken token) {
-        tokenStore.put(userId, token);
-        log.debug("Token stored for user: {}", userId);
+    public void storeToken(String userId, String username, OAuthToken token) {
+        OAuthTokenEntity entity = tokenRepository.findById(userId).orElse(new OAuthTokenEntity());
+        entity.setUserId(userId);
+        entity.setUsername(username);
+        entity.setAccessToken(token.accessToken());
+        entity.setTokenType(token.tokenType());
+        entity.setScope(token.scope());
+        entity.setRefreshToken(token.refreshToken());
+        entity.setExpiresAt(token.expiresAt());
+        tokenRepository.save(entity);
+        log.debug("Token stored in database for user: {} ({})", username, userId);
     }
 
-    /**
-     * Retrieves a valid token for a user, refreshing if necessary.
-     * 
-     * @param userId The GitHub user ID
-     * @return The access token, or null if not found or invalid
-     */
+    public void storeToken(String userId, OAuthToken token) {
+        storeToken(userId, null, token);
+    }
+
     public String getAccessToken(String userId) {
-        OAuthToken token = tokenStore.get(userId);
-        
-        if (token == null) {
+        Optional<OAuthTokenEntity> entityOpt = tokenRepository.findById(userId);
+
+        if (entityOpt.isEmpty()) {
             return null;
         }
 
-        // Check if token needs refresh
-        if (token.expiresWithin(REFRESH_BUFFER_SECONDS) && token.refreshToken() != null) {
+        OAuthTokenEntity entity = entityOpt.get();
+
+        if (entity.getExpiresAt() != null
+                && Instant.now().plusSeconds(REFRESH_BUFFER_SECONDS).isAfter(entity.getExpiresAt())
+                && entity.getRefreshToken() != null) {
             try {
-                OAuthToken newToken = refreshAccessToken(token.refreshToken());
-                tokenStore.put(userId, newToken);
+                OAuthToken newToken = refreshAccessToken(entity.getRefreshToken());
+                storeToken(userId, entity.getUsername(), newToken);
                 return newToken.accessToken();
             } catch (Exception e) {
-                log.warn("Failed to refresh token for user {}, token may be expired", userId);
-                tokenStore.remove(userId);
+                log.warn("Failed to refresh token for user {}, removing stale entry", userId);
+                tokenRepository.deleteById(userId);
                 return null;
             }
         }
 
-        // Check if token is expired without refresh capability
-        if (token.isExpired()) {
+        if (entity.getExpiresAt() != null && Instant.now().isAfter(entity.getExpiresAt())) {
             log.warn("Token expired for user {} with no refresh token", userId);
-            tokenStore.remove(userId);
+            tokenRepository.deleteById(userId);
             return null;
         }
 
-        return token.accessToken();
+        return entity.getAccessToken();
     }
 
-    /**
-     * Checks if a user has a valid token.
-     * 
-     * @param userId The GitHub user ID
-     * @return true if the user has a valid (non-expired) token
-     */
     public boolean hasValidToken(String userId) {
-        OAuthToken token = tokenStore.get(userId);
-        if (token == null) {
+        Optional<OAuthTokenEntity> entityOpt = tokenRepository.findById(userId);
+
+        if (entityOpt.isEmpty()) {
             return false;
         }
-        
-        // If token is expired but has refresh token, try to refresh
-        if (token.isExpired() && token.refreshToken() != null) {
-            try {
-                OAuthToken newToken = refreshAccessToken(token.refreshToken());
-                tokenStore.put(userId, newToken);
-                return true;
-            } catch (Exception e) {
-                tokenStore.remove(userId);
-                return false;
+
+        OAuthTokenEntity entity = entityOpt.get();
+
+        if (entity.getExpiresAt() != null && Instant.now().isAfter(entity.getExpiresAt())) {
+            if (entity.getRefreshToken() != null) {
+                try {
+                    OAuthToken newToken = refreshAccessToken(entity.getRefreshToken());
+                    storeToken(userId, entity.getUsername(), newToken);
+                    return true;
+                } catch (Exception e) {
+                    tokenRepository.deleteById(userId);
+                    return false;
+                }
             }
+            tokenRepository.deleteById(userId);
+            return false;
         }
-        
-        return !token.isExpired();
+
+        return true;
     }
 
-    /**
-     * Revokes a user's token (removes from store and optionally revokes on GitHub).
-     * 
-     * @param userId The GitHub user ID
-     */
     public void revokeToken(String userId) {
-        OAuthToken token = tokenStore.remove(userId);
-        
-        if (token != null) {
-            // Optionally revoke the token on GitHub
-            // This requires Basic auth with client_id:client_secret
+        Optional<OAuthTokenEntity> entityOpt = tokenRepository.findById(userId);
+
+        if (entityOpt.isPresent()) {
+            OAuthTokenEntity entity = entityOpt.get();
             try {
                 String credentials = oauthProperties.getClientId() + ":" + oauthProperties.getClientSecret();
-                String basicAuth = Base64Encoder.encode(credentials);
+                String basicAuth = Base64.getEncoder().encodeToString(credentials.getBytes(StandardCharsets.UTF_8));
 
                 webClient.method(org.springframework.http.HttpMethod.DELETE)
                         .uri("https://api.github.com/applications/{client_id}/token",
-                             oauthProperties.getClientId())
+                                oauthProperties.getClientId())
                         .header(HttpHeaders.AUTHORIZATION, "Basic " + basicAuth)
                         .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
-                        .body(BodyInserters.fromValue("{\"access_token\":\"" + token.accessToken() + "\"}"))
+                        .body(BodyInserters.fromValue("{\"access_token\":\"" + entity.getAccessToken() + "\"}"))
                         .retrieve()
                         .bodyToMono(Void.class)
                         .block();
 
                 log.info("Token revoked on GitHub for user: {}", userId);
             } catch (Exception e) {
-                // Token revocation is best-effort
                 log.warn("Failed to revoke token on GitHub: {}", e.getMessage());
             }
+
+            tokenRepository.deleteById(userId);
         }
-        
-        log.info("Token removed from store for user: {}", userId);
+
+        log.info("Token removed from database for user: {}", userId);
     }
 
-    /**
-     * Gets the stored token object for a user (for checking expiration, scopes, etc.)
-     */
     public OAuthToken getToken(String userId) {
-        return tokenStore.get(userId);
+        return tokenRepository.findById(userId)
+                .map(entity -> {
+                    if (entity.getExpiresAt() != null && entity.getRefreshToken() != null) {
+                        return OAuthToken.withExpiration(
+                                entity.getAccessToken(), entity.getTokenType(),
+                                entity.getScope(), entity.getRefreshToken(),
+                                (int) (entity.getExpiresAt().getEpochSecond() - Instant.now().getEpochSecond()));
+                    }
+                    return OAuthToken.of(entity.getAccessToken(), entity.getTokenType(), entity.getScope());
+                })
+                .orElse(null);
     }
 
-    // Simple Base64 encoder helper
-    private static class Base64Encoder {
-        static String encode(String input) {
-            return java.util.Base64.getEncoder().encodeToString(input.getBytes(StandardCharsets.UTF_8));
+    public long getActiveUserCount() {
+        return tokenRepository.countByExpiresAtIsNullOrExpiresAtAfter(Instant.now());
+    }
+
+    public void storeState(String state) {
+        pendingStates.entrySet().removeIf(e -> System.currentTimeMillis() - e.getValue() > STATE_EXPIRY_MS);
+        pendingStates.put(state, System.currentTimeMillis());
+    }
+
+    public boolean validateAndConsumeState(String state) {
+        Long createdAt = pendingStates.remove(state);
+        if (createdAt == null) {
+            return false;
         }
+        return System.currentTimeMillis() - createdAt <= STATE_EXPIRY_MS;
+    }
+
+    private final ConcurrentHashMap<String, String> pendingAuthCodes = new ConcurrentHashMap<>();
+
+    public String createAuthCode(String userId) {
+        String code = UUID.randomUUID().toString();
+        pendingAuthCodes.put(code, userId + "|" + System.currentTimeMillis());
+        return code;
+    }
+
+    public String exchangeAuthCode(String code) {
+        String value = pendingAuthCodes.remove(code);
+        if (value == null) {
+            return null;
+        }
+        String[] parts = value.split("\\|");
+        long createdAt = Long.parseLong(parts[1]);
+        if (System.currentTimeMillis() - createdAt > STATE_EXPIRY_MS) {
+            return null;
+        }
+        return parts[0];
     }
 }
